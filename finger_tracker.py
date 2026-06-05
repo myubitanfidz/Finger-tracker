@@ -11,12 +11,17 @@ HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
 VisionRunningMode = mp.tasks.vision.RunningMode
 
 screen_width, screen_height = pyautogui.size()
+
+# OPTIMASI 1: Pengaturan PyAutoGUI agar respons gerakan instan
+pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0 
 
 options = HandLandmarkerOptions(
     base_options=BaseOptions(model_asset_path='hand_landmarker.task'),
     running_mode=VisionRunningMode.VIDEO,
-    num_hands=1
+    num_hands=1,
+    min_hand_detection_confidence=0.8, # Ketat agar tidak salah mendeteksi objek latar belakang
+    min_hand_presence_confidence=0.8   # Tetap mengunci tangan dengan kuat
 )
 
 # Variabel Status untuk Gestur Pinch
@@ -25,14 +30,22 @@ pinch_start_time = 0
 last_pinch_release_time = 0
 click_ready = False
 
-# Parameter Kalibrasi
-PINCH_THRESHOLD = 0.04       # Jarak minimal jempol-telunjuk dianggap menempel
-HOLD_DELAY = 0.4             # Durasi menempel untuk dianggap "Klik Tahan" (detik)
-DOUBLE_CLICK_DELAY = 0.35    # Jeda maksimal antar klik untuk "Double Click" (detik)
+# OPTIMASI 2: Variabel Filter Smoothing EMA (Peredam Getaran Kursor)
+prev_x, prev_y = 0, 0
+SMOOTHING_FACTOR = 0.20  # Nilai diatur ke 0.20 agar pergerakan kursor sangat halus di layar
 
+# Parameter Kalibrasi Jarak & Waktu
+PINCH_THRESHOLD = 0.04       # Ambang batas jarak 2D jempol-telunjuk untuk klik
+HOLD_DELAY = 0.4             # Waktu tahan untuk memicu Drag & Drop (detik)
+DOUBLE_CLICK_DELAY = 0.35    # Jeda maksimal antar klik untuk Double Click (detik)
+
+# OPTIMASI 3: Atur resolusi kamera ke 640x480 agar beban komputasi AI ringan dan FPS naik
 cap = cv2.VideoCapture(0)
-print("Project Finger Tracker - Thumb Anchor Mode Aktif...")
-print("Kursor sekarang dikendalikan oleh IBU JARI agar lebih stabil saat klik.")
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+print("Project Finger Tracker - Optimized Version Aktif...")
+print("Kursor stabil (Thumb Anchor) + Mulus (EMA Filter) + Akurat (Jarak 2D).")
 
 with HandLandmarker.create_from_options(options) as landmarker:
     while cap.isOpened():
@@ -53,21 +66,31 @@ with HandLandmarker.create_from_options(options) as landmarker:
                 thumb_tip = hand_landmarks[4]
                 index_tip = hand_landmarks[8]
 
-                # 1. GERAKKAN KURSOR BERDASARKAN IBU JARI (THUMB_TIP)
-                cursor_x = int(thumb_tip.x * screen_width)
-                cursor_y = int(thumb_tip.y * screen_height)
-                pyautogui.moveTo(cursor_x, cursor_y)
+                # Target koordinat mentah dari kamera berdasarkan posisi Ibu Jari
+                target_x = int(thumb_tip.x * screen_width)
+                target_y = int(thumb_tip.y * screen_height)
 
-                # 2. Hitung Jarak Jari untuk Deteksi Klik
+                # OPTIMASI 4: Penerapan Rumus Smoothing EMA
+                if prev_x == 0 and prev_y == 0:
+                    curr_x, curr_y = target_x, target_y
+                else:
+                    curr_x = int((target_x * SMOOTHING_FACTOR) + (prev_x * (1 - SMOOTHING_FACTOR)))
+                    curr_y = int((target_y * SMOOTHING_FACTOR) + (prev_y * (1 - SMOOTHING_FACTOR)))
+
+                # Pindahkan kursor ke koordinat yang sudah difilter
+                pyautogui.moveTo(curr_x, curr_y)
+                prev_x, prev_y = curr_x, curr_y
+
+                # OPTIMASI 5: Hitung Jarak Jari secara 2D murni (Menghapus variabel .z)
+                # Langkah ini meningkatkan akurasi deteksi cubitan secara signifikan
                 distance = math.sqrt(
                     (index_tip.x - thumb_tip.x)**2 + 
-                    (index_tip.y - thumb_tip.y)**2 + 
-                    (index_tip.z - thumb_tip.z)**2
+                    (index_tip.y - thumb_tip.y)**2
                 )
 
                 current_time = time.time()
 
-                # 3. Logika Pinch (Klik & Drag)
+                # Logika Pinch (Klik & Drag)
                 if distance < PINCH_THRESHOLD:
                     if not is_pinching:
                         is_pinching = True
@@ -98,15 +121,18 @@ with HandLandmarker.create_from_options(options) as landmarker:
                 ix, iy = int(index_tip.x * w), int(index_tip.y * h)
                 tx, ty = int(thumb_tip.x * w), int(thumb_tip.y * h)
                 
-                # Gambar lingkaran pada ibu jari (sebagai pusat kursor)
+                # Gambar lingkaran pada ibu jari (Pusat Kendali Kursor)
                 cv2.circle(frame, (tx, ty), 10, (255, 0, 255), cv2.FILLED)
                 
-                # Gambar garis indikator antar jari
+                # Gambar garis indikator transisi antar jari
                 line_color = (0, 0, 255) if is_pinching else (255, 0, 0)
                 cv2.line(frame, (ix, iy), (tx, ty), line_color, 2)
                 
                 status_text = "HOLD/DRAG" if (is_pinching and not click_ready) else ("PINCH" if is_pinching else "FREE")
                 cv2.putText(frame, f"Status: {status_text}", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        else:
+            # Reset koordinat lama jika tangan sempat hilang dari frame kamera
+            prev_x, prev_y = 0, 0
 
         cv2.imshow('Project Finger Tracker - Monitor', frame)
 
